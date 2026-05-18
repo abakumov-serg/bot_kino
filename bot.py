@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import requests
+import urllib3
 
 BASE_URL = "https://www.multikino.pl"
 DEFAULT_CINEMA_SLUG = "warszawa-mlociny"
@@ -24,14 +25,10 @@ NEXT_DATA_RE = re.compile(
     re.DOTALL,
 )
 
-WEEKDAY_UA = {
-    0: "Пн",
-    1: "Вт",
-    2: "Ср",
-    3: "Чт",
-    4: "Пт",
-    5: "Сб",
-    6: "Нд",
+WEEKDAY_LABELS = {
+    "uk": {0: "Пн", 1: "Вт", 2: "Ср", 3: "Чт", 4: "Пт", 5: "Сб", 6: "Нд"},
+    "pl": {0: "Pn", 1: "Wt", 2: "Śr", 3: "Cz", 4: "Pt", 5: "Sb", 6: "Nd"},
+    "en": {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"},
 }
 
 KIDS_GENRE_KEYWORDS = {
@@ -73,20 +70,243 @@ SESSIONS_MARK = "▶️"
 SPECIAL_PRADA_NOTE = "🟥 Герасимова, може сюди сходимо?"
 RATINGS_MARK = "⭐"
 FILM_SEPARATOR = "────────────"
-BOT_COMMANDS = [
-    {"command": "week", "description": "7 днів, із сеансами"},
-    {"command": "week_l", "description": "7 днів, без сеансів"},
-    {"command": "today", "description": "Сьогодні, із сеансами"},
-    {"command": "today_l", "description": "Сьогодні, без сеансів"},
-    {"command": "tomorrow", "description": "Завтра, із сеансами"},
-    {"command": "tomorrow_l", "description": "Завтра, без сеансів"},
-    {"command": "commands", "description": "Список доступних команд"},
-    {"command": "help", "description": "Підказка"},
-]
+REPORT_COMMANDS: dict[str, tuple[int, bool, int]] = {
+    "/today": (1, False, 0),
+    "/today_l": (1, True, 0),
+    "/tomorrow": (1, False, 1),
+    "/tomorrow_l": (1, True, 1),
+    "/week": (7, False, 0),
+    "/week_l": (7, True, 0),
+}
+SUPPORTED_LOCALES: tuple[str, ...] = ("uk", "pl", "en")
+COMMAND_SPECS: tuple[tuple[str, str], ...] = (
+    ("week", "cmd_week"),
+    ("week_l", "cmd_week_l"),
+    ("today", "cmd_today"),
+    ("today_l", "cmd_today_l"),
+    ("tomorrow", "cmd_tomorrow"),
+    ("tomorrow_l", "cmd_tomorrow_l"),
+    ("commands", "cmd_commands"),
+    ("help", "cmd_help"),
+)
+KNOWN_CINEMA_LABELS = {
+    "warszawa-mlociny": "Warszawa Młociny",
+}
+KNOWN_CINEMA_IDS = {
+    "warszawa-mlociny": "0040",
+}
+LOCALE_TEXTS: dict[str, dict[str, str]] = {
+    "uk": {
+        "commands_title": "Доступні команди",
+        "cmd_week": "7 днів, із сеансами",
+        "cmd_week_l": "7 днів, без сеансів",
+        "cmd_today": "Сьогодні, із сеансами",
+        "cmd_today_l": "Сьогодні, без сеансів",
+        "cmd_tomorrow": "Завтра, із сеансами",
+        "cmd_tomorrow_l": "Завтра, без сеансів",
+        "cmd_commands": "Список доступних команд",
+        "cmd_help": "Підказка",
+        "start_intro": "Привіт. Я бот для {cinema_label}.",
+        "unknown_command": "Не зрозумів команду.",
+        "schedule_fetch_failed": "Не вдалося отримати розклад. Спробуй ще раз трохи пізніше.",
+        "multikino_ip_blocked": (
+            "Multikino блокує запити з цього сервера (403). "
+            "Додай MULTIKINO_PROXY_URL у .env або зміни egress IP."
+        ),
+        "cinema_label": "Кіно",
+        "period_label": "Період",
+        "kids_filtered": "Дитячі фільми відфільтровано.",
+        "list_only_format": "Формат: тільки перелік фільмів (без сеансів).",
+        "ratings_enabled": "Рейтинги: увімкнено (TMDb/OMDb).",
+        "ratings_disabled": "Рейтинги: вимкнено. Додай TMDB_API_KEY і OMDB_API_KEY у .env.",
+        "no_sessions": "Немає сеансів за обраними умовами.",
+        "no_movies": "Немає фільмів за обраними умовами.",
+        "modern_section": "Сучасні ({year}+):",
+        "retro_section": "Ретро за десятиліттями:",
+        "unknown_year_section": "Без року релізу:",
+        "no_items": "- Немає",
+        "genre_label": "Жанр",
+        "unknown_genre": "невідомо",
+        "decade_suffix": "-ті",
+        "help_title": "Довідка",
+        "help_about": (
+            "Цей бот показує розклад Multikino, відфільтровує дитячі фільми, "
+            "ділить фільми на сучасні та ретро і може показувати рейтинги TMDb/OMDb."
+        ),
+        "help_commands_hint": "Список команд: /commands",
+        "locale_current": "Поточна локалізація: {locale_name} ({locale_code})",
+        "locale_available": "Доступні локалі: {locales}",
+        "locale_hint": "Адмін може змінити мову через BOT_LOCALE=uk|pl|en у .env.",
+        "lang_name_uk": "українська",
+        "lang_name_pl": "польська",
+        "lang_name_en": "англійська",
+    },
+    "pl": {
+        "commands_title": "Dostępne komendy",
+        "cmd_week": "7 dni, z seansami",
+        "cmd_week_l": "7 dni, bez seansów",
+        "cmd_today": "Dzisiaj, z seansami",
+        "cmd_today_l": "Dzisiaj, bez seansów",
+        "cmd_tomorrow": "Jutro, z seansami",
+        "cmd_tomorrow_l": "Jutro, bez seansów",
+        "cmd_commands": "Lista komend",
+        "cmd_help": "Pomoc",
+        "start_intro": "Cześć. Jestem botem dla {cinema_label}.",
+        "unknown_command": "Nie rozumiem komendy.",
+        "schedule_fetch_failed": "Nie udało się pobrać repertuaru. Spróbuj ponownie trochę później.",
+        "multikino_ip_blocked": (
+            "Multikino blokuje zapytania z tego serwera (403). "
+            "Dodaj MULTIKINO_PROXY_URL do .env albo zmień adres egress IP."
+        ),
+        "cinema_label": "Kino",
+        "period_label": "Okres",
+        "kids_filtered": "Filmy dziecięce odfiltrowane.",
+        "list_only_format": "Tryb: tylko lista filmów (bez seansów).",
+        "ratings_enabled": "Oceny: włączone (TMDb/OMDb).",
+        "ratings_disabled": "Oceny: wyłączone. Dodaj TMDB_API_KEY i OMDB_API_KEY w .env.",
+        "no_sessions": "Brak seansów dla wybranych warunków.",
+        "no_movies": "Brak filmów dla wybranych warunków.",
+        "modern_section": "Współczesne ({year}+):",
+        "retro_section": "Retro według dekad:",
+        "unknown_year_section": "Bez roku premiery:",
+        "no_items": "- Brak",
+        "genre_label": "Gatunek",
+        "unknown_genre": "nieznany",
+        "decade_suffix": "-te",
+        "help_title": "Pomoc",
+        "help_about": (
+            "Ten bot pokazuje repertuar Multikino, filtruje filmy dziecięce, "
+            "dzieli filmy na współczesne i retro oraz może pokazywać oceny TMDb/OMDb."
+        ),
+        "help_commands_hint": "Lista komend: /commands",
+        "locale_current": "Bieżąca lokalizacja: {locale_name} ({locale_code})",
+        "locale_available": "Dostępne języki: {locales}",
+        "locale_hint": "Administrator może zmienić język przez BOT_LOCALE=uk|pl|en w .env.",
+        "lang_name_uk": "ukraiński",
+        "lang_name_pl": "polski",
+        "lang_name_en": "angielski",
+    },
+    "en": {
+        "commands_title": "Available commands",
+        "cmd_week": "7 days, with sessions",
+        "cmd_week_l": "7 days, no sessions",
+        "cmd_today": "Today, with sessions",
+        "cmd_today_l": "Today, no sessions",
+        "cmd_tomorrow": "Tomorrow, with sessions",
+        "cmd_tomorrow_l": "Tomorrow, no sessions",
+        "cmd_commands": "Command list",
+        "cmd_help": "Help",
+        "start_intro": "Hi. I'm a bot for {cinema_label}.",
+        "unknown_command": "Unknown command.",
+        "schedule_fetch_failed": "Failed to fetch schedule. Please try again later.",
+        "multikino_ip_blocked": (
+            "Multikino blocks requests from this server (403). "
+            "Set MULTIKINO_PROXY_URL in .env or change egress IP."
+        ),
+        "cinema_label": "Cinema",
+        "period_label": "Period",
+        "kids_filtered": "Kids movies filtered out.",
+        "list_only_format": "Mode: film list only (no sessions).",
+        "ratings_enabled": "Ratings: enabled (TMDb/OMDb).",
+        "ratings_disabled": "Ratings: disabled. Add TMDB_API_KEY and OMDB_API_KEY to .env.",
+        "no_sessions": "No sessions for selected criteria.",
+        "no_movies": "No movies for selected criteria.",
+        "modern_section": "Modern ({year}+):",
+        "retro_section": "Retro by decades:",
+        "unknown_year_section": "Without release year:",
+        "no_items": "- None",
+        "genre_label": "Genre",
+        "unknown_genre": "unknown",
+        "decade_suffix": "s",
+        "help_title": "Help",
+        "help_about": (
+            "This bot shows Multikino schedule, filters kids movies, splits films into modern and retro, "
+            "and can show TMDb/OMDb ratings."
+        ),
+        "help_commands_hint": "Command list: /commands",
+        "locale_current": "Current locale: {locale_name} ({locale_code})",
+        "locale_available": "Available locales: {locales}",
+        "locale_hint": "Admin can change language via BOT_LOCALE=uk|pl|en in .env.",
+        "lang_name_uk": "Ukrainian",
+        "lang_name_pl": "Polish",
+        "lang_name_en": "English",
+    },
+}
 
 
 def normalize_text(text: str) -> str:
     return " ".join((text or "").casefold().split())
+
+
+def resolve_locale(raw_locale: str) -> str:
+    detected = detect_supported_locale(raw_locale)
+    if detected:
+        return detected
+    return "uk"
+
+
+def detect_supported_locale(raw_locale: str) -> str:
+    locale = normalize_text(raw_locale).replace("_", "-")
+    # Explicit preference: route Russian locale users to Ukrainian.
+    if locale.startswith("ru"):
+        return "uk"
+    for code in SUPPORTED_LOCALES:
+        if locale.startswith(code):
+            return code
+    return ""
+
+
+def locale_text(locale: str) -> dict[str, str]:
+    return LOCALE_TEXTS.get(locale, LOCALE_TEXTS["uk"])
+
+
+def weekday_labels(locale: str) -> dict[int, str]:
+    return WEEKDAY_LABELS.get(locale, WEEKDAY_LABELS["uk"])
+
+
+def build_bot_commands(locale: str) -> list[dict[str, str]]:
+    texts = locale_text(locale)
+    return [{"command": command, "description": texts[text_key]} for command, text_key in COMMAND_SPECS]
+
+
+def build_commands_text(locale: str) -> str:
+    texts = locale_text(locale)
+    lines = [f"{texts['commands_title']}:"]
+    for command, text_key in COMMAND_SPECS:
+        lines.append(f"/{command} - {texts[text_key]}")
+    return "\n".join(lines)
+
+
+def build_help_text(locale: str, current_locale: str) -> str:
+    texts = locale_text(locale)
+    locale_parts = []
+    for code in SUPPORTED_LOCALES:
+        locale_name = texts.get(f"lang_name_{code}", code)
+        locale_parts.append(f"<code>{code}</code> ({locale_name})")
+    locales_text = ", ".join(locale_parts)
+    current_name = texts.get(f"lang_name_{current_locale}", current_locale)
+
+    return (
+        f"<b>{texts['help_title']}</b>\n"
+        f"{texts['help_about']}\n\n"
+        f"{texts['help_commands_hint']}\n\n"
+        f"{texts['locale_current'].format(locale_name=current_name, locale_code=current_locale)}\n"
+        f"{texts['locale_available'].format(locales=locales_text)}\n"
+        f"{texts['locale_hint']}"
+    )
+
+
+def resolve_cinema_label(cinema_slug: str) -> str:
+    explicit = os.getenv("BOT_CINEMA_LABEL", "").strip()
+    if explicit:
+        return explicit
+
+    known = KNOWN_CINEMA_LABELS.get(cinema_slug)
+    if known:
+        return known
+
+    humanized = " ".join(part.capitalize() for part in cinema_slug.replace("-", " ").split())
+    return humanized or "Multikino"
 
 
 def read_env_int(name: str, default: int) -> int:
@@ -97,6 +317,18 @@ def read_env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def read_env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = normalize_text(value)
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
 
 
 def load_dotenv_file(dotenv_path: Path) -> None:
@@ -176,6 +408,7 @@ class FilmRatings:
     omdb_imdb_rating: str = ""
     omdb_metascore: str = ""
     omdb_rotten_tomatoes: str = ""
+    omdb_year: int | None = None
     omdb_genres: tuple[str, ...] = ()
 
     def has_any(self) -> bool:
@@ -209,53 +442,117 @@ class MultikinoClient:
         session: requests.Session,
         cinema_slug: str,
         base_url: str = BASE_URL,
+        cinema_id_override: str | None = None,
     ) -> None:
         self.session = session
         self.base_url = base_url.rstrip("/")
         self.cinema_slug = cinema_slug
+        self.cinema_id_override = (cinema_id_override or "").strip() or None
         self.cinema_id: str | None = None
         self.build_id: str | None = None
         self._auth_ready = False
         self._film_meta_cache: dict[str, FilmMetadata] = {}
 
     def initialize(self) -> None:
+        if self.cinema_id_override:
+            self.cinema_id = self.cinema_id_override
+            logging.info(
+                "Використовую MULTIKINO_CINEMA_ID=%s для '%s'",
+                self.cinema_id,
+                self.cinema_slug,
+            )
+
         repertuar_url = f"{self.base_url}/repertuar/{self.cinema_slug}/teraz-gramy"
-        response = self.session.get(repertuar_url, timeout=30)
-        response.raise_for_status()
+        try:
+            response = self.session.get(repertuar_url, timeout=30)
+            response.raise_for_status()
+            match = NEXT_DATA_RE.search(response.text)
+            if match:
+                payload = json.loads(match.group(1))
+                self.build_id = payload.get("buildId")
+                self.cinema_id = (
+                    payload.get("props", {})
+                    .get("pageProps", {})
+                    .get("layoutData", {})
+                    .get("sitecore", {})
+                    .get("context", {})
+                    .get("cinema", {})
+                    .get("cinemaId", {})
+                    .get("value")
+                )
+            else:
+                logging.warning("Не знайдено __NEXT_DATA__ на сторінці %s", repertuar_url)
+        except requests.RequestException as exc:
+            logging.warning("Не вдалося прочитати сторінку %s: %s", repertuar_url, exc)
 
-        match = NEXT_DATA_RE.search(response.text)
-        if not match:
-            raise RuntimeError("Не вдалося знайти __NEXT_DATA__ на сторінці Multikino")
+        if not self.cinema_id:
+            known_id = KNOWN_CINEMA_IDS.get(self.cinema_slug)
+            if known_id:
+                self.cinema_id = known_id
+                logging.info(
+                    "cinemaId для '%s' взято з вбудованого мапінгу: %s",
+                    self.cinema_slug,
+                    self.cinema_id,
+                )
 
-        payload = json.loads(match.group(1))
-        self.build_id = payload.get("buildId")
-        self.cinema_id = (
-            payload.get("props", {})
-            .get("pageProps", {})
-            .get("layoutData", {})
-            .get("sitecore", {})
-            .get("context", {})
-            .get("cinema", {})
-            .get("cinemaId", {})
-            .get("value")
-        )
+        # Fallback for servers/IPs where HTML page is blocked (403), but microservice API is available.
+        if not self.cinema_id:
+            self.cinema_id = self._resolve_cinema_id_from_api()
+
+        if not self.cinema_id:
+            logging.warning("Не вдалося отримати cinemaId для Multikino. Команди розкладу тимчасово недоступні.")
 
         if not self.build_id:
-            raise RuntimeError("Не вдалося отримати buildId із сторінки Multikino")
-        if not self.cinema_id:
-            raise RuntimeError("Не вдалося отримати cinemaId із сторінки Multikino")
+            logging.warning(
+                "buildId недоступний; метадані фільмів будуть братися з showings API/рейтингів."
+            )
 
     def ensure_auth(self) -> None:
         if self._auth_ready:
             return
 
-        response = self.session.post(
-            f"{self.base_url}/api/microservice/auth/token",
-            headers={"Accept": "application/json", "Content-Type": "application/json"},
-            timeout=30,
-        )
-        response.raise_for_status()
-        self._auth_ready = True
+        try:
+            response = self.session.post(
+                f"{self.base_url}/api/microservice/auth/token",
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=30,
+            )
+            if response.status_code == 403:
+                logging.warning("auth/token повернув 403. Продовжую без auth-токена.")
+                self._auth_ready = False
+                return
+            response.raise_for_status()
+            self._auth_ready = True
+        except requests.RequestException as exc:
+            logging.warning("Не вдалося отримати auth token: %s. Продовжую без нього.", exc)
+            self._auth_ready = False
+
+    def _resolve_cinema_id_from_api(self) -> str | None:
+        try:
+            response = self.session.get(
+                f"{self.base_url}/api/microservice/showings/cinemas",
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            logging.warning("Не вдалося отримати список кінотеатрів через API: %s", exc)
+            return None
+
+        for bucket in payload.get("result") or []:
+            for cinema in bucket.get("cinemas") or []:
+                whats_on_url = str(cinema.get("whatsOnUrl") or "")
+                slug = self._extract_cinema_slug_from_whats_on_url(whats_on_url)
+                if slug == self.cinema_slug:
+                    cinema_id = str(cinema.get("cinemaId") or "").strip()
+                    if cinema_id:
+                        logging.info(
+                            "cinemaId для '%s' знайдено через API: %s",
+                            self.cinema_slug,
+                            cinema_id,
+                        )
+                        return cinema_id
+        return None
 
     def get_showings_for_day(self, day: date) -> list[dict[str, Any]]:
         self.ensure_auth()
@@ -272,6 +569,20 @@ class MultikinoClient:
             },
             timeout=30,
         )
+        if response.status_code == 401:
+            logging.info("showings повернув 401. Повторюю запит після оновлення auth token.")
+            self._auth_ready = False
+            self.ensure_auth()
+            response = self.session.get(
+                f"{self.base_url}/api/microservice/showings/cinemas/{self.cinema_id}/films",
+                params={
+                    "showingDate": day.isoformat(),
+                    "minEmbargoLevel": 2,
+                    "includesSession": "true",
+                    "includeSessionAttributes": "true",
+                },
+                timeout=30,
+            )
         response.raise_for_status()
         payload = response.json()
         return payload.get("result") or []
@@ -281,13 +592,10 @@ class MultikinoClient:
         if cached:
             return cached
 
-        if not self.build_id:
-            raise RuntimeError("Немає buildId для запиту деталей фільму")
-
         slug = self._extract_slug(film_url)
         metadata = FilmMetadata(film_id=film_id, title=fallback_title, release_year=None)
 
-        if not slug:
+        if not self.build_id or not slug:
             self._film_meta_cache[film_id] = metadata
             return metadata
 
@@ -368,6 +676,17 @@ class MultikinoClient:
         return None
 
     @staticmethod
+    def _extract_cinema_slug_from_whats_on_url(whats_on_url: str) -> str | None:
+        try:
+            path = urlparse(whats_on_url).path
+            parts = [p for p in path.split("/") if p]
+            if len(parts) >= 3 and parts[0] == "repertuar":
+                return parts[1]
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
     def _find_film_fields(payload: dict[str, Any], film_id: str) -> dict[str, Any] | None:
         stack: list[Any] = [payload]
         while stack:
@@ -437,10 +756,12 @@ class RatingsProvider:
                 imdb_rating = omdb_payload.get("imdbRating")
                 metascore = omdb_payload.get("Metascore")
                 omdb_genre_raw = omdb_payload.get("Genre")
+                omdb_year = self._parse_omdb_year(omdb_payload.get("Year"))
                 if isinstance(imdb_rating, str) and imdb_rating != "N/A":
                     ratings.omdb_imdb_rating = imdb_rating
                 if isinstance(metascore, str) and metascore != "N/A":
                     ratings.omdb_metascore = metascore
+                ratings.omdb_year = omdb_year
                 if isinstance(omdb_genre_raw, str) and omdb_genre_raw != "N/A":
                     parsed_genres = tuple(
                         g.strip()
@@ -472,31 +793,38 @@ class RatingsProvider:
         for candidate in title_candidates:
             if not candidate:
                 continue
-            params: dict[str, Any] = {"api_key": self.tmdb_api_key, "query": candidate}
+            query_variants: list[dict[str, Any]] = []
+            params_with_year: dict[str, Any] = {"api_key": self.tmdb_api_key, "query": candidate}
             if year:
-                params["year"] = year
-            try:
-                response = self.session.get(
-                    "https://api.themoviedb.org/3/search/movie",
-                    params=params,
-                    timeout=20,
-                )
-                response.raise_for_status()
-                payload = response.json()
-            except Exception as exc:
-                logging.warning("TMDb search failed for '%s': %s", candidate, exc)
-                continue
+                params_with_year["year"] = year
+            query_variants.append(params_with_year)
+            if year:
+                # Fallback when local year is a re-release year and TMDb result lives under original year.
+                query_variants.append({"api_key": self.tmdb_api_key, "query": candidate})
 
-            for index, movie in enumerate(payload.get("results") or []):
-                score = self._score_tmdb_result(
-                    wanted_title=title,
-                    wanted_year=year,
-                    movie=movie,
-                    position=index,
-                )
-                if score > best_score:
-                    best_score = score
-                    best_movie = movie
+            for params in query_variants:
+                try:
+                    response = self.session.get(
+                        "https://api.themoviedb.org/3/search/movie",
+                        params=params,
+                        timeout=20,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                except Exception as exc:
+                    logging.warning("TMDb search failed for '%s': %s", candidate, exc)
+                    continue
+
+                for index, movie in enumerate(payload.get("results") or []):
+                    score = self._score_tmdb_result(
+                        wanted_title=title,
+                        wanted_year=year,
+                        movie=movie,
+                        position=index,
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_movie = movie
 
         return best_movie
 
@@ -570,6 +898,8 @@ class RatingsProvider:
         if year:
             title_query["y"] = str(year)
         queries.append(title_query)
+        if year:
+            queries.append({"t": title})
 
         for query in queries:
             params = {"apikey": self.omdb_api_key, **query}
@@ -585,6 +915,18 @@ class RatingsProvider:
                 return payload
 
         return None
+
+    @staticmethod
+    def _parse_omdb_year(raw_year: Any) -> int | None:
+        if not isinstance(raw_year, str):
+            return None
+        match = YEAR_IN_TEXT_RE.search(raw_year)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
 
 def is_kids_movie(metadata: FilmMetadata) -> bool:
@@ -728,10 +1070,14 @@ def collect_week_schedule(
                         and "animation" not in omdb_genres_norm
                     ):
                         genres = ratings.omdb_genres
+                release_year_for_output = metadata.release_year
+                if ratings.omdb_year is not None:
+                    if release_year_for_output is None or release_year_for_output - ratings.omdb_year >= 10:
+                        release_year_for_output = ratings.omdb_year
                 item = FilmSchedule(
                     film_id=film_id,
                     title=metadata.title,
-                    release_year=metadata.release_year,
+                    release_year=release_year_for_output,
                     genres=genres,
                     ratings=ratings,
                 )
@@ -744,7 +1090,8 @@ def collect_week_schedule(
     )
 
 
-def format_sessions_by_day(schedule: FilmSchedule) -> str:
+def format_sessions_by_day(schedule: FilmSchedule, locale: str = "uk") -> str:
+    weekday_names = weekday_labels(locale)
     chunks = []
     for day in sorted(schedule.sessions_by_date):
         times = schedule.sessions_by_date[day]
@@ -753,7 +1100,7 @@ def format_sessions_by_day(schedule: FilmSchedule) -> str:
             times_text = f"{shown} +{len(times) - 6}"
         else:
             times_text = ", ".join(times)
-        chunks.append(f"{WEEKDAY_UA[day.weekday()]} {day:%d.%m}: {times_text}")
+        chunks.append(f"{weekday_names[day.weekday()]} {day:%d.%m}: {times_text}")
     return " | ".join(chunks)
 
 
@@ -773,26 +1120,98 @@ def format_ratings_lines(ratings: FilmRatings) -> list[str]:
     return parts
 
 
-def format_week_report(
+def _append_film_block(
+    lines: list[str],
+    film: FilmSchedule,
+    texts: dict[str, str],
+    include_sessions: bool,
+    locale: str,
+) -> None:
+    title = html.escape(film.title)
+    year_suffix = f" ({film.release_year})" if film.release_year is not None else ""
+    genres_text = ", ".join(film.genres) if film.genres else texts["unknown_genre"]
+
+    lines.append(f"{MOVIE_MARK} <b>{title}</b>{year_suffix}")
+    lines.append(f"  {GENRE_MARK} {texts['genre_label']}: {html.escape(genres_text)}")
+    for rating_text in format_ratings_lines(film.ratings):
+        lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
+    if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
+        lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
+    if include_sessions:
+        lines.append(f"  {SESSIONS_MARK} {format_sessions_by_day(film, locale=locale)}")
+    lines.append(FILM_SEPARATOR)
+
+
+def _append_regular_section(
+    lines: list[str],
+    films: list[FilmSchedule],
+    texts: dict[str, str],
+    include_sessions: bool,
+    locale: str,
+) -> None:
+    if not films:
+        lines.append(texts["no_items"])
+        return
+    for film in films:
+        _append_film_block(
+            lines,
+            film=film,
+            texts=texts,
+            include_sessions=include_sessions,
+            locale=locale,
+        )
+
+
+def _append_retro_section(
+    lines: list[str],
+    films: list[FilmSchedule],
+    texts: dict[str, str],
+    include_sessions: bool,
+    locale: str,
+) -> None:
+    if not films:
+        lines.append(texts["no_items"])
+        return
+
+    by_decade: dict[int, list[FilmSchedule]] = {}
+    for film in films:
+        decade = (film.release_year // 10) * 10  # type: ignore[operator]
+        by_decade.setdefault(decade, []).append(film)
+
+    for decade in sorted(by_decade.keys(), reverse=True):
+        lines.append(f"{decade}{texts['decade_suffix']}:")
+        for film in sorted(by_decade[decade], key=lambda f: f.title):
+            _append_film_block(
+                lines,
+                film=film,
+                texts=texts,
+                include_sessions=include_sessions,
+                locale=locale,
+            )
+
+
+def _format_report(
     schedules: list[FilmSchedule],
     start_day: date,
     days: int,
     modern_year_threshold: int,
-    ratings_enabled: bool = False,
+    ratings_enabled: bool,
+    list_only: bool,
+    locale: str,
+    cinema_label: str,
 ) -> str:
+    texts = locale_text(locale)
     end_day = start_day + timedelta(days=days - 1)
     header = (
-        f"Кіно: Warszawa Młociny\n"
-        f"Період: {start_day:%d.%m.%Y} - {end_day:%d.%m.%Y}\n"
-        f"Дитячі фільми відфільтровано.\n"
+        f"{texts['cinema_label']}: {cinema_label}\n"
+        f"{texts['period_label']}: {start_day:%d.%m.%Y} - {end_day:%d.%m.%Y}\n"
+        f"{texts['list_only_format'] if list_only else texts['kids_filtered']}\n"
     )
-    ratings_status = (
-        "Рейтинги: увімкнено (TMDb/OMDb)." if ratings_enabled
-        else "Рейтинги: вимкнено. Додай TMDB_API_KEY і OMDB_API_KEY у .env."
-    )
+    ratings_status = texts["ratings_enabled"] if ratings_enabled else texts["ratings_disabled"]
 
     if not schedules:
-        return header + f"{RATINGS_MARK} {ratings_status}\n\nНемає сеансів за обраними умовами."
+        empty_text = texts["no_movies"] if list_only else texts["no_sessions"]
+        return header + f"{RATINGS_MARK} {ratings_status}\n\n{empty_text}"
 
     modern = [s for s in schedules if s.release_year is not None and s.release_year >= modern_year_threshold]
     retro = [s for s in schedules if s.release_year is not None and s.release_year < modern_year_threshold]
@@ -801,63 +1220,58 @@ def format_week_report(
     lines = [header]
     lines.append(f"{RATINGS_MARK} {ratings_status}")
     lines.append("")
-    lines.append(f"Сучасні ({modern_year_threshold}+):")
-    if modern:
-        for film in modern:
-            year = film.release_year if film.release_year is not None else "?"
-            genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-            lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b> ({year})")
-            lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-            ratings_lines = format_ratings_lines(film.ratings)
-            for rating_text in ratings_lines:
-                lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-            if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-            lines.append(f"  {SESSIONS_MARK} {format_sessions_by_day(film)}")
-            lines.append(FILM_SEPARATOR)
-    else:
-        lines.append("- Немає")
+    lines.append(texts["modern_section"].format(year=modern_year_threshold))
+    _append_regular_section(
+        lines,
+        modern,
+        texts,
+        include_sessions=not list_only,
+        locale=locale,
+    )
 
     lines.append("")
-    lines.append("Ретро за десятиліттями:")
-    if retro:
-        by_decade: dict[int, list[FilmSchedule]] = {}
-        for film in retro:
-            decade = (film.release_year // 10) * 10  # type: ignore[operator]
-            by_decade.setdefault(decade, []).append(film)
-
-        for decade in sorted(by_decade.keys(), reverse=True):
-            lines.append(f"{decade}-ті:")
-            for film in sorted(by_decade[decade], key=lambda f: f.title):
-                genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-                lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b> ({film.release_year})")
-                lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-                ratings_lines = format_ratings_lines(film.ratings)
-                for rating_text in ratings_lines:
-                    lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-                if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                    lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-                lines.append(f"  {SESSIONS_MARK} {format_sessions_by_day(film)}")
-                lines.append(FILM_SEPARATOR)
-    else:
-        lines.append("- Немає")
+    lines.append(texts["retro_section"])
+    _append_retro_section(
+        lines,
+        retro,
+        texts,
+        include_sessions=not list_only,
+        locale=locale,
+    )
 
     if unknown:
         lines.append("")
-        lines.append("Без року релізу:")
-        for film in unknown:
-            genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-            lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b>")
-            lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-            ratings_lines = format_ratings_lines(film.ratings)
-            for rating_text in ratings_lines:
-                lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-            if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-            lines.append(f"  {SESSIONS_MARK} {format_sessions_by_day(film)}")
-            lines.append(FILM_SEPARATOR)
+        lines.append(texts["unknown_year_section"])
+        _append_regular_section(
+            lines,
+            unknown,
+            texts,
+            include_sessions=not list_only,
+            locale=locale,
+        )
 
     return "\n".join(lines).strip()
+
+
+def format_week_report(
+    schedules: list[FilmSchedule],
+    start_day: date,
+    days: int,
+    modern_year_threshold: int,
+    ratings_enabled: bool = False,
+    locale: str = "uk",
+    cinema_label: str = "Warszawa Młociny",
+) -> str:
+    return _format_report(
+        schedules=schedules,
+        start_day=start_day,
+        days=days,
+        modern_year_threshold=modern_year_threshold,
+        ratings_enabled=ratings_enabled,
+        list_only=False,
+        locale=locale,
+        cinema_label=cinema_label,
+    )
 
 
 def split_for_telegram(message: str, limit: int = 3900) -> list[str]:
@@ -881,6 +1295,15 @@ def split_for_telegram(message: str, limit: int = 3900) -> list[str]:
     return parts
 
 
+def is_multikino_forbidden_error(exc: Exception) -> bool:
+    if not isinstance(exc, requests.HTTPError):
+        return False
+    response = exc.response
+    if response is None or response.status_code != 403:
+        return False
+    return "multikino.pl" in str(response.url or "")
+
+
 def extract_command(text: str) -> str:
     token = (text or "").strip().split(maxsplit=1)[0] if (text or "").strip() else ""
     if not token.startswith("/"):
@@ -894,82 +1317,19 @@ def format_list_only_report(
     days: int,
     modern_year_threshold: int,
     ratings_enabled: bool = False,
+    locale: str = "uk",
+    cinema_label: str = "Warszawa Młociny",
 ) -> str:
-    end_day = start_day + timedelta(days=days - 1)
-    header = (
-        f"Кіно: Warszawa Młociny\n"
-        f"Період: {start_day:%d.%m.%Y} - {end_day:%d.%m.%Y}\n"
-        f"Формат: тільки перелік фільмів (без сеансів).\n"
+    return _format_report(
+        schedules=schedules,
+        start_day=start_day,
+        days=days,
+        modern_year_threshold=modern_year_threshold,
+        ratings_enabled=ratings_enabled,
+        list_only=True,
+        locale=locale,
+        cinema_label=cinema_label,
     )
-    ratings_status = (
-        "Рейтинги: увімкнено (TMDb/OMDb)." if ratings_enabled
-        else "Рейтинги: вимкнено. Додай TMDB_API_KEY і OMDB_API_KEY у .env."
-    )
-
-    if not schedules:
-        return header + f"{RATINGS_MARK} {ratings_status}\n\nНемає фільмів за обраними умовами."
-
-    modern = [s for s in schedules if s.release_year is not None and s.release_year >= modern_year_threshold]
-    retro = [s for s in schedules if s.release_year is not None and s.release_year < modern_year_threshold]
-    unknown = [s for s in schedules if s.release_year is None]
-
-    lines = [header]
-    lines.append(f"{RATINGS_MARK} {ratings_status}")
-    lines.append("")
-    lines.append(f"Сучасні ({modern_year_threshold}+):")
-    if modern:
-        for film in modern:
-            year = film.release_year if film.release_year is not None else "?"
-            genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-            lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b> ({year})")
-            lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-            ratings_lines = format_ratings_lines(film.ratings)
-            for rating_text in ratings_lines:
-                lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-            if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-            lines.append(FILM_SEPARATOR)
-    else:
-        lines.append("- Немає")
-
-    lines.append("")
-    lines.append("Ретро за десятиліттями:")
-    if retro:
-        by_decade: dict[int, list[FilmSchedule]] = {}
-        for film in retro:
-            decade = (film.release_year // 10) * 10  # type: ignore[operator]
-            by_decade.setdefault(decade, []).append(film)
-
-        for decade in sorted(by_decade.keys(), reverse=True):
-            lines.append(f"{decade}-ті:")
-            for film in sorted(by_decade[decade], key=lambda f: f.title):
-                genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-                lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b> ({film.release_year})")
-                lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-                ratings_lines = format_ratings_lines(film.ratings)
-                for rating_text in ratings_lines:
-                    lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-                if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                    lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-                lines.append(FILM_SEPARATOR)
-    else:
-        lines.append("- Немає")
-
-    if unknown:
-        lines.append("")
-        lines.append("Без року релізу:")
-        for film in unknown:
-            genres_text = ", ".join(film.genres) if film.genres else "невідомо"
-            lines.append(f"{MOVIE_MARK} <b>{html.escape(film.title)}</b>")
-            lines.append(f"  {GENRE_MARK} Жанр: {html.escape(genres_text)}")
-            ratings_lines = format_ratings_lines(film.ratings)
-            for rating_text in ratings_lines:
-                lines.append(f"  {RATINGS_MARK} {html.escape(rating_text)}")
-            if normalize_text(film.title).startswith("diabeł ubiera się u prady"):
-                lines.append(f"  {html.escape(SPECIAL_PRADA_NOTE)}")
-            lines.append(FILM_SEPARATOR)
-
-    return "\n".join(lines).strip()
 
 
 class TelegramBot:
@@ -981,6 +1341,9 @@ class TelegramBot:
         timezone_name: str,
         modern_year_threshold: int,
         week_days: int,
+        locale: str,
+        locale_auto: bool,
+        cinema_label: str,
     ) -> None:
         self.token = token
         self.kino_client = kino_client
@@ -988,6 +1351,11 @@ class TelegramBot:
         self.tz = ZoneInfo(timezone_name)
         self.modern_year_threshold = modern_year_threshold
         self.week_days = week_days
+        self.locale = resolve_locale(locale)
+        self.locale_auto = locale_auto
+        self.cinema_label = cinema_label
+        self._commands_text_cache: dict[str, str] = {}
+        self._help_text_cache: dict[str, str] = {}
         self.api_base = f"https://api.telegram.org/bot{self.token}"
         self.offset = 0
 
@@ -1028,32 +1396,57 @@ class TelegramBot:
             )
             response.raise_for_status()
 
-    def _commands_text(self) -> str:
-        return (
-            "Доступні команди:\n"
-            "/week - 7 днів, із сеансами\n"
-            "/week_l - 7 днів, без сеансів\n"
-            "/today - сьогодні, із сеансами\n"
-            "/today_l - сьогодні, без сеансів\n"
-            "/tomorrow - завтра, із сеансами\n"
-            "/tomorrow_l - завтра, без сеансів\n"
-            "/commands - список команд\n"
-            "/help - підказка"
-        )
+    def _commands_text(self, locale_code: str) -> str:
+        cached = self._commands_text_cache.get(locale_code)
+        if cached:
+            return cached
+        value = build_commands_text(locale_code)
+        self._commands_text_cache[locale_code] = value
+        return value
+
+    def _help_text(self, locale_code: str) -> str:
+        cached = self._help_text_cache.get(locale_code)
+        if cached:
+            return cached
+        value = build_help_text(locale_code, locale_code)
+        self._help_text_cache[locale_code] = value
+        return value
 
     def _register_commands(self) -> None:
         try:
-            response = requests.post(
-                f"{self.api_base}/setMyCommands",
-                json={"commands": BOT_COMMANDS},
-                timeout=30,
-            )
+            response = requests.post(f"{self.api_base}/setMyCommands", json={"commands": build_bot_commands(self.locale)}, timeout=30)
             response.raise_for_status()
             payload = response.json()
             if not payload.get("ok"):
                 logging.warning("Не вдалося оновити список команд бота: %s", payload)
+
+            for locale_code in SUPPORTED_LOCALES:
+                response = requests.post(
+                    f"{self.api_base}/setMyCommands",
+                    json={
+                        "commands": build_bot_commands(locale_code),
+                        "language_code": locale_code,
+                    },
+                    timeout=30,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                if not payload.get("ok"):
+                    logging.warning(
+                        "Не вдалося оновити список команд бота для locale=%s: %s",
+                        locale_code,
+                        payload,
+                    )
         except Exception as exc:
             logging.warning("Не вдалося зареєструвати команди в Telegram: %s", exc)
+
+    def _effective_locale(self, message: dict[str, Any]) -> str:
+        if not self.locale_auto:
+            return self.locale
+        user = message.get("from") or {}
+        raw_locale = str(user.get("language_code") or "").strip()
+        detected = detect_supported_locale(raw_locale)
+        return detected or self.locale
 
     def _handle_update(self, update: dict[str, Any]) -> None:
         message = update.get("message")
@@ -1063,42 +1456,38 @@ class TelegramBot:
         chat_id = message["chat"]["id"]
         text = (message.get("text") or "").strip()
         command = extract_command(text)
+        current_locale = self._effective_locale(message)
+        texts = locale_text(current_locale)
 
-        if command in {"/start", "/help"}:
-            self._send_message(chat_id, "Привіт. Я бот для Multikino Warszawa Młociny.\n\n" + self._commands_text())
+        if command == "/start":
+            intro = texts["start_intro"].format(cinema_label=self.cinema_label)
+            self._send_message(chat_id, f"{intro}\n\n{self._commands_text(current_locale)}")
+            return
+
+        if command == "/help":
+            self._send_message(chat_id, self._help_text(current_locale))
             return
 
         if command == "/commands":
-            self._send_message(chat_id, self._commands_text())
+            self._send_message(chat_id, self._commands_text(current_locale))
             return
 
-        if command == "/today":
-            self._send_report(chat_id, days=1, list_only=False, start_offset_days=0)
-            return
-
-        if command == "/today_l":
-            self._send_report(chat_id, days=1, list_only=True, start_offset_days=0)
-            return
-
-        if command == "/tomorrow":
-            self._send_report(chat_id, days=1, list_only=False, start_offset_days=1)
-            return
-
-        if command == "/tomorrow_l":
-            self._send_report(chat_id, days=1, list_only=True, start_offset_days=1)
-            return
-
-        if command == "/week":
-            self._send_report(chat_id, days=self.week_days, list_only=False, start_offset_days=0)
-            return
-
-        if command == "/week_l":
-            self._send_report(chat_id, days=self.week_days, list_only=True, start_offset_days=0)
+        if command in REPORT_COMMANDS:
+            days, list_only, start_offset_days = REPORT_COMMANDS[command]
+            if command.startswith("/week"):
+                days = self.week_days
+            self._send_report(
+                chat_id,
+                days=days,
+                list_only=list_only,
+                start_offset_days=start_offset_days,
+                locale=current_locale,
+            )
             return
 
         self._send_message(
             chat_id,
-            "Не зрозумів команду.\n\n" + self._commands_text(),
+            f"{texts['unknown_command']}\n\n{self._commands_text(current_locale)}",
         )
 
     def _send_report(
@@ -1107,7 +1496,9 @@ class TelegramBot:
         days: int,
         list_only: bool = False,
         start_offset_days: int = 0,
+        locale: str = "uk",
     ) -> None:
+        texts = locale_text(locale)
         start_day = datetime.now(self.tz).date() + timedelta(days=start_offset_days)
         try:
             schedules = collect_week_schedule(
@@ -1123,6 +1514,8 @@ class TelegramBot:
                     days=days,
                     modern_year_threshold=self.modern_year_threshold,
                     ratings_enabled=bool(self.ratings_provider and self.ratings_provider.enabled()),
+                    locale=locale,
+                    cinema_label=self.cinema_label,
                 )
             else:
                 report = format_week_report(
@@ -1131,11 +1524,16 @@ class TelegramBot:
                     days=days,
                     modern_year_threshold=self.modern_year_threshold,
                     ratings_enabled=bool(self.ratings_provider and self.ratings_provider.enabled()),
+                    locale=locale,
+                    cinema_label=self.cinema_label,
                 )
             self._send_message(chat_id, report)
         except Exception as exc:
             logging.exception("Не вдалося зібрати звіт: %s", exc)
-            self._send_message(chat_id, "Не вдалося отримати розклад. Спробуй ще раз трохи пізніше.")
+            if is_multikino_forbidden_error(exc):
+                self._send_message(chat_id, texts["multikino_ip_blocked"])
+            else:
+                self._send_message(chat_id, texts["schedule_fetch_failed"])
 
 
 def build_client(cinema_slug: str) -> MultikinoClient:
@@ -1148,9 +1546,37 @@ def build_client(cinema_slug: str) -> MultikinoClient:
                 "Chrome/136.0.0.0 Safari/537.36"
             ),
             "Accept-Language": "pl-PL,pl;q=0.9,en;q=0.8,uk;q=0.7",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": f"{BASE_URL}/repertuar/{cinema_slug}/teraz-gramy",
+            "Origin": BASE_URL,
         }
     )
-    client = MultikinoClient(session=session, cinema_slug=cinema_slug)
+    multikino_proxy = os.getenv("MULTIKINO_PROXY_URL", "").strip()
+    if multikino_proxy:
+        if multikino_proxy.startswith("https://"):
+            logging.warning(
+                "MULTIKINO_PROXY_URL починається з https://. Для CONNECT-проксі зазвичай потрібен http://."
+            )
+        session.proxies.update({"http": multikino_proxy, "https": multikino_proxy})
+        logging.info("Для Multikino використовується проксі: %s", multikino_proxy)
+
+    proxy_ca_bundle = os.getenv("MULTIKINO_PROXY_CA_BUNDLE", "").strip()
+    if proxy_ca_bundle:
+        session.verify = proxy_ca_bundle
+        logging.info("Для проксі використовується CA bundle: %s", proxy_ca_bundle)
+
+    proxy_insecure = normalize_text(os.getenv("MULTIKINO_PROXY_INSECURE", ""))
+    if proxy_insecure in {"1", "true", "yes"}:
+        session.verify = False
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logging.warning("УВАГА: MULTIKINO_PROXY_INSECURE увімкнено, TLS-перевірка вимкнена.")
+
+    cinema_id_override = os.getenv("MULTIKINO_CINEMA_ID", "").strip() or None
+    client = MultikinoClient(
+        session=session,
+        cinema_slug=cinema_slug,
+        cinema_id_override=cinema_id_override,
+    )
     client.initialize()
     return client
 
@@ -1161,6 +1587,8 @@ def run_print_week(
     days: int,
     timezone_name: str,
     modern_year_threshold: int,
+    locale: str,
+    cinema_label: str,
 ) -> None:
     start_day = datetime.now(ZoneInfo(timezone_name)).date()
     schedules = collect_week_schedule(client, start_day, days=days, ratings_provider=ratings_provider)
@@ -1170,6 +1598,8 @@ def run_print_week(
         days=days,
         modern_year_threshold=modern_year_threshold,
         ratings_enabled=bool(ratings_provider and ratings_provider.enabled()),
+        locale=locale,
+        cinema_label=cinema_label,
     )
     print(report)
 
@@ -1193,10 +1623,13 @@ def main() -> None:
     args = parser.parse_args()
 
     timezone_name = os.getenv("BOT_TIMEZONE", "Europe/Warsaw")
+    locale = resolve_locale(os.getenv("BOT_LOCALE", "uk"))
+    locale_auto = read_env_bool("BOT_LOCALE_AUTO", True)
     modern_year_threshold = read_env_int("MODERN_YEAR_THRESHOLD", 2010)
     week_days = read_env_int("WEEK_DAYS", 7)
     tmdb_api_key = os.getenv("TMDB_API_KEY", "").strip()
     omdb_api_key = os.getenv("OMDB_API_KEY", "").strip()
+    cinema_label = resolve_cinema_label(args.cinema_slug)
 
     client = build_client(args.cinema_slug)
     ratings_provider: RatingsProvider | None = None
@@ -1220,6 +1653,8 @@ def main() -> None:
             days=week_days,
             timezone_name=timezone_name,
             modern_year_threshold=modern_year_threshold,
+            locale=locale,
+            cinema_label=cinema_label,
         )
         return
 
@@ -1232,6 +1667,9 @@ def main() -> None:
         timezone_name=timezone_name,
         modern_year_threshold=modern_year_threshold,
         week_days=week_days,
+        locale=locale,
+        locale_auto=locale_auto,
+        cinema_label=cinema_label,
     )
     bot.run()
 

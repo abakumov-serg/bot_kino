@@ -20,6 +20,12 @@ pip install -r requirements.txt
 1. Скопіюй файл `.env.example` у `.env` (або просто вистав змінні середовища).
 2. Вкажи `TELEGRAM_BOT_TOKEN` (або просто запусти бота і встав токен один раз у консоль - він сам збереже у `.env`).
 3. (Опційно) Додай ключі `TMDB_API_KEY` і `OMDB_API_KEY`, щоб бот показував рейтинги.
+4. (Опційно) `BOT_LOCALE=uk|pl|en` для базової мови інтерфейсу бота.
+5. (Опційно) `BOT_LOCALE_AUTO=1` (за замовчуванням) — автопідбір мови за `Telegram language_code` користувача (`uk|pl|en`).
+6. Якщо треба жорстко одна мова для всіх, постав `BOT_LOCALE_AUTO=0`.
+7. (Опційно) `BOT_CINEMA_LABEL=...` для свого лейблу кінотеатру в заголовку звіту.
+8. Для Oracle VPS можна задати `MULTIKINO_CINEMA_ID=0040`, щоб обійти 403 на HTML-сторінці.
+9. Якщо Multikino блокує ваш VPS IP (403 навіть на showings API), задай `MULTIKINO_PROXY_URL=http://user:pass@host:port`.
 
 Приклад:
 
@@ -106,7 +112,8 @@ newgrp docker
 Він робить:
 - синхронізацію з `/home/opc/<project-name>-src` у `/opt/<project-name>-container/current`;
 - створення runtime-папок;
-- створення secrets-файла `.env` у `runtime/secrets`;
+- якщо існує `/home/opc/<project-name>-src/.env`, копіює його в `runtime/secrets/.env`;
+- якщо `.env` у staging немає і secrets-файла ще немає, створює його з `.env.example`;
 - запуск `docker compose up -d --build`.
 
 Запуск на сервері:
@@ -116,10 +123,44 @@ cd /home/opc/bot_kino-src
 ./scripts/deploy_project.sh bot_kino
 ```
 
+Локальний one-click скрипт (з Mac/Linux): [scripts/deploy_remote.sh](/Users/fisha/Projects/kino/scripts/deploy_remote.sh)
+
+Він:
+- копіює код у `/home/opc/bot_kino-src`;
+- (за замовчуванням) копіює локальний `.env` у staging;
+- підключається по SSH і запускає `./scripts/deploy_project.sh bot_kino` на сервері.
+
+Запуск:
+
+```bash
+bash /Users/fisha/Projects/kino/scripts/deploy_remote.sh
+```
+
+Опції:
+
+```bash
+bash /Users/fisha/Projects/kino/scripts/deploy_remote.sh --no-up
+bash /Users/fisha/Projects/kino/scripts/deploy_remote.sh --no-env
+bash /Users/fisha/Projects/kino/scripts/deploy_remote.sh --logs
+```
+
 Або без запуску контейнера:
 
 ```bash
 ./scripts/deploy_project.sh bot_kino --no-up
+```
+
+Якщо хочеш закинути `.env` з локального Mac у staging на сервері:
+
+```bash
+scp -i ~/Downloads/ssh-key-2026-04-28.key /Users/fisha/Projects/kino/.env opc@130.162.43.132:/home/opc/bot_kino-src/.env
+```
+
+Після цього звичайний деплой автоматично оновить secrets-файл:
+
+```bash
+cd /home/opc/bot_kino-src
+./scripts/deploy_project.sh bot_kino
 ```
 
 ## Нотатки
@@ -127,3 +168,4 @@ cd /home/opc/bot_kino-src
 - Бот використовує публічні endpoint-и `multikino.pl` і автоматично отримує службовий токен доступу.
 - Фільтрація дитячих фільмів робиться за жанрами/атрибутами фільму і ключовими словами в назві.
 - Рейтинги TMDb/OMDb показуються лише якщо задані `TMDB_API_KEY` / `OMDB_API_KEY`.
+- `/commands` і `/help` формуються з одного джерела (без копіпасти в коді).

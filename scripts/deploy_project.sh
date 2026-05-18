@@ -24,6 +24,7 @@ APP_DATA_DIR="${RUNTIME_DIR}/app-data"
 SECRETS_DIR="${RUNTIME_DIR}/secrets"
 SECRETS_ENV_FILE="${SECRETS_DIR}/.env"
 LINKED_ENV_FILE="${CURRENT_DIR}/.env"
+STAGING_ENV_FILE="${STAGING_SRC}/.env"
 
 if [[ ! -d "${STAGING_SRC}" ]]; then
   echo "ERROR: staging directory not found: ${STAGING_SRC}"
@@ -62,7 +63,11 @@ rsync -a --delete \
 echo "==> Ensuring runtime dirs"
 mkdir -p "${APP_DATA_DIR}" "${SECRETS_DIR}"
 
-if [[ ! -f "${SECRETS_ENV_FILE}" ]]; then
+if [[ -f "${STAGING_ENV_FILE}" ]]; then
+  cp "${STAGING_ENV_FILE}" "${SECRETS_ENV_FILE}"
+  chmod 600 "${SECRETS_ENV_FILE}"
+  echo "Updated secrets env from staging: ${STAGING_ENV_FILE}"
+elif [[ ! -f "${SECRETS_ENV_FILE}" ]]; then
   if [[ -f "${CURRENT_DIR}/.env.example" ]]; then
     cp "${CURRENT_DIR}/.env.example" "${SECRETS_ENV_FILE}"
   else
