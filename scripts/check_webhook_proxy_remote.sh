@@ -27,6 +27,13 @@ ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes "${REMOTE}" "
   echo '== local health =='
   curl -sk --max-time 5 https://127.0.0.1:${PUBLIC_PORT}/healthz || true
   echo
+  echo '== public ip from server =='
+  curl -sS --max-time 5 https://api.ipify.org || true
+  echo
+  echo
+  echo '== listening sockets =='
+  sudo ss -lntp | grep -E ':${PUBLIC_PORT}|:18081|:18082|:8080' || true
+  echo
   echo '== proxy logs =='
   docker compose -p '${PROXY_PROJECT}' -f '${PROXY_COMPOSE}' logs --tail=40
   echo
