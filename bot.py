@@ -1398,8 +1398,8 @@ def build_webhook_config(token: str, raw_url: str) -> WebhookConfig:
     max_connections = read_env_int("TELEGRAM_WEBHOOK_MAX_CONNECTIONS", 40)
     ip_address = os.getenv("TELEGRAM_WEBHOOK_IP_ADDRESS", "").strip() or None
 
-    if bool(cert_file) != bool(key_file):
-        raise RuntimeError("TELEGRAM_WEBHOOK_CERT_FILE і TELEGRAM_WEBHOOK_KEY_FILE треба задавати разом.")
+    if key_file and not cert_file:
+        raise RuntimeError("TELEGRAM_WEBHOOK_KEY_FILE потребує TELEGRAM_WEBHOOK_CERT_FILE.")
 
     return WebhookConfig(
         url=webhook_url,

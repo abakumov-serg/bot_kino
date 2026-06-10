@@ -1,7 +1,6 @@
 services:
   kino-bot:
     build: .
-    container_name: kino-bot
     restart: unless-stopped
     env_file:
       - .env

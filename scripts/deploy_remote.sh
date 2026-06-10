@@ -122,8 +122,8 @@ fi
 
 if [[ "${TAIL_LOGS}" -eq 1 ]]; then
   echo "==> Attaching logs"
-  ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -t "${REMOTE}" "docker compose -f '${REMOTE_COMPOSE}' logs -f --tail=120"
+  ssh -i "${SSH_KEY}" -o IdentitiesOnly=yes -t "${REMOTE}" "docker compose -p '${PROJECT_NAME}' -f '${REMOTE_COMPOSE}' logs -f --tail=120"
 else
   echo "==> Done."
-  echo "Logs: ssh -i '${SSH_KEY}' ${REMOTE} \"docker compose -f '${REMOTE_COMPOSE}' logs -f --tail=120\""
+  echo "Logs: ssh -i '${SSH_KEY}' ${REMOTE} \"docker compose -p '${PROJECT_NAME}' -f '${REMOTE_COMPOSE}' logs -f --tail=120\""
 fi

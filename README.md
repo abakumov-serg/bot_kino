@@ -129,6 +129,79 @@ docker compose -f /opt/bot_kino-container/current/docker-compose.yml logs -f --t
 curl -k https://130.162.43.132:8443/healthz
 ```
 
+### Багато ботів на одному IP і порту
+
+Можна підключити 2-го, 3-го або 10-го Telegram-бота до однієї публічної адреси. У всіх буде один host/port, але різні webhook paths:
+
+```text
+https://130.162.43.132:8443/bot-kino
+https://130.162.43.132:8443/tasks-bot
+https://130.162.43.132:8443/another-bot
+```
+
+Напряму кілька Docker-контейнерів не можуть одночасно зайняти один host-порт `8443`, тому використовується один reverse proxy. Самі боти слухають різні локальні порти, наприклад `18081`, `18082`, `18083`.
+
+На сервері є універсальний setup-скрипт: [scripts/setup_webhook_proxy_server.sh](/Users/fisha/Projects/kino/scripts/setup_webhook_proxy_server.sh). Він читає registry-файл:
+
+```text
+/opt/bot_kino-webhook-proxy/current/webhook-bots.tsv
+```
+
+Формат registry:
+
+```text
+# project_name webhook_path host_port
+bot_kino /bot-kino 127.0.0.1:18081
+tasks_bot /tasks-bot 127.0.0.1:18082
+another_bot /another-bot 127.0.0.1:18083
+```
+
+Для кожного рядка скрипт:
+
+- додає route у nginx reverse proxy;
+- ставить `TELEGRAM_UPDATE_MODE=webhook`;
+- ставить правильний `TELEGRAM_WEBHOOK_URL`;
+- копіює public certificate у `runtime/secrets/webhook.crt`;
+- запускає контейнер тільки якщо в `.env` є валідний `TELEGRAM_BOT_TOKEN`.
+
+Перший запуск для поточного бота:
+
+```bash
+cd /home/opc/bot_kino-src
+bash ./scripts/setup_webhook_proxy_server.sh
+```
+
+Або з локального Mac після синхронізації коду:
+
+```bash
+bash /Users/fisha/Projects/kino/scripts/setup_webhook_proxy_remote.sh
+```
+
+Щоб додати ще одного бота:
+
+```bash
+bash /Users/fisha/Projects/kino/scripts/deploy_remote.sh tasks_bot --no-env --no-up
+```
+
+Потім на сервері додай рядок:
+
+```bash
+echo "tasks_bot /tasks-bot 127.0.0.1:18082" >> /opt/bot_kino-webhook-proxy/current/webhook-bots.tsv
+```
+
+Впиши token другого бота в:
+
+```text
+/opt/tasks_bot-container/current/runtime/secrets/.env
+```
+
+І перезапусти proxy setup:
+
+```bash
+cd /home/opc/bot_kino-src
+bash ./scripts/setup_webhook_proxy_server.sh
+```
+
 ## 6) Деплой у Docker (Linux VPS)
 
 На сервері в папці проєкту:

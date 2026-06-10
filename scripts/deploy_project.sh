@@ -87,11 +87,11 @@ fi
 
 echo "==> Starting containers"
 cd "${CURRENT_DIR}"
-docker compose up -d --build --remove-orphans
+docker compose -p "${PROJECT_NAME}" up -d --build --remove-orphans
 
 echo "==> Done."
 echo "Project: ${PROJECT_NAME}"
 echo "Code:    ${CURRENT_DIR}"
 echo "Data:    ${APP_DATA_DIR}"
 echo "Secrets: ${SECRETS_ENV_FILE}"
-echo "Logs:    docker compose -f ${CURRENT_DIR}/docker-compose.yml logs -f"
+echo "Logs:    docker compose -p ${PROJECT_NAME} -f ${CURRENT_DIR}/docker-compose.yml logs -f"
