@@ -10,4 +10,6 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY bot.py /app/bot.py
 
+EXPOSE 8080 8443
+
 CMD ["python", "-u", "/app/bot.py"]

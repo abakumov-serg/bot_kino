@@ -5,3 +5,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "${TELEGRAM_WEBHOOK_PORT:-8080}:${TELEGRAM_WEBHOOK_LISTEN_PORT:-8080}"
+    volumes:
+      - ./runtime:/app/runtime:ro

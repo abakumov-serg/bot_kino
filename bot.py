@@ -2,11 +2,18 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
+import hashlib
 import html
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
 import os
 import re
+import ssl
+import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -53,6 +60,7 @@ KIDS_TITLE_KEYWORDS = (
     "psi patrol",
 )
 TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
+WEBHOOK_SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{1,256}$")
 YEAR_IN_TEXT_RE = re.compile(r"\b(19\d{2}|20\d{2})\b")
 SEQUEL_TEXT_HINTS = (
     "kontynuac",
@@ -95,6 +103,7 @@ KNOWN_CINEMA_LABELS = {
 KNOWN_CINEMA_IDS = {
     "warszawa-mlociny": "0040",
 }
+WEBHOOK_ALLOWED_UPDATES = ["message"]
 LOCALE_TEXTS: dict[str, dict[str, str]] = {
     "uk": {
         "commands_title": "Доступні команди",
@@ -1332,6 +1341,136 @@ def format_list_only_report(
     )
 
 
+@dataclass(frozen=True)
+class WebhookConfig:
+    url: str
+    path: str
+    secret_token: str
+    listen_host: str
+    listen_port: int
+    cert_file: str | None = None
+    key_file: str | None = None
+    upload_certificate: bool = False
+    drop_pending_updates: bool = False
+    max_connections: int = 40
+    ip_address: str | None = None
+
+    @property
+    def direct_tls_enabled(self) -> bool:
+        return bool(self.cert_file and self.key_file)
+
+
+def resolve_webhook_secret(token: str) -> str:
+    raw_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip()
+    if raw_secret:
+        secret = raw_secret
+    else:
+        secret = hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+    if not WEBHOOK_SECRET_RE.fullmatch(secret):
+        raise RuntimeError(
+            "TELEGRAM_WEBHOOK_SECRET має містити тільки A-Z, a-z, 0-9, '_' або '-' і бути до 256 символів."
+        )
+    return secret
+
+
+def build_webhook_config(token: str, raw_url: str) -> WebhookConfig:
+    webhook_url = raw_url.strip()
+    if not webhook_url:
+        raise RuntimeError("Для webhook-режиму треба задати TELEGRAM_WEBHOOK_URL у .env.")
+
+    parsed = urlparse(webhook_url)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise RuntimeError("TELEGRAM_WEBHOOK_URL має бути повним HTTPS URL, наприклад https://host:8443.")
+
+    secret_token = resolve_webhook_secret(token)
+    webhook_path = parsed.path or "/"
+    if webhook_path == "/":
+        webhook_path = f"/telegram/webhook/{secret_token[:32]}"
+        webhook_url = webhook_url.rstrip("/") + webhook_path
+
+    listen_host = os.getenv("TELEGRAM_WEBHOOK_LISTEN_HOST", "0.0.0.0").strip() or "0.0.0.0"
+    listen_port = read_env_int("TELEGRAM_WEBHOOK_LISTEN_PORT", 8080)
+    cert_file = os.getenv("TELEGRAM_WEBHOOK_CERT_FILE", "").strip() or None
+    key_file = os.getenv("TELEGRAM_WEBHOOK_KEY_FILE", "").strip() or None
+    upload_certificate = read_env_bool("TELEGRAM_WEBHOOK_UPLOAD_CERT", False)
+    drop_pending_updates = read_env_bool("TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES", False)
+    max_connections = read_env_int("TELEGRAM_WEBHOOK_MAX_CONNECTIONS", 40)
+    ip_address = os.getenv("TELEGRAM_WEBHOOK_IP_ADDRESS", "").strip() or None
+
+    if bool(cert_file) != bool(key_file):
+        raise RuntimeError("TELEGRAM_WEBHOOK_CERT_FILE і TELEGRAM_WEBHOOK_KEY_FILE треба задавати разом.")
+
+    return WebhookConfig(
+        url=webhook_url,
+        path=webhook_path,
+        secret_token=secret_token,
+        listen_host=listen_host,
+        listen_port=listen_port,
+        cert_file=cert_file,
+        key_file=key_file,
+        upload_certificate=upload_certificate,
+        drop_pending_updates=drop_pending_updates,
+        max_connections=max(1, min(max_connections, 100)),
+        ip_address=ip_address,
+    )
+
+
+def make_webhook_handler(bot: "TelegramBot", config: WebhookConfig) -> type[BaseHTTPRequestHandler]:
+    class TelegramWebhookHandler(BaseHTTPRequestHandler):
+        server_version = "KinoTelegramWebhook/1.0"
+
+        def log_message(self, format: str, *args: Any) -> None:
+            logging.info("Webhook HTTP: " + format, *args)
+
+        def _send_plain(self, status: HTTPStatus, body: str) -> None:
+            payload = body.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self) -> None:
+            request_path = urlparse(self.path).path
+            if request_path == "/healthz":
+                self._send_plain(HTTPStatus.OK, "ok")
+                return
+            self._send_plain(HTTPStatus.NOT_FOUND, "not found")
+
+        def do_POST(self) -> None:
+            request_path = urlparse(self.path).path
+            if request_path != config.path:
+                self._send_plain(HTTPStatus.NOT_FOUND, "not found")
+                return
+
+            header_secret = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if header_secret != config.secret_token:
+                self._send_plain(HTTPStatus.FORBIDDEN, "forbidden")
+                return
+
+            try:
+                content_length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self._send_plain(HTTPStatus.BAD_REQUEST, "bad content length")
+                return
+
+            if content_length <= 0 or content_length > 1024 * 1024:
+                self._send_plain(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "bad payload size")
+                return
+
+            try:
+                update = json.loads(self.rfile.read(content_length).decode("utf-8"))
+            except json.JSONDecodeError:
+                self._send_plain(HTTPStatus.BAD_REQUEST, "bad json")
+                return
+
+            bot.handle_update_async(update)
+            self._send_plain(HTTPStatus.OK, "ok")
+
+    return TelegramWebhookHandler
+
+
 class TelegramBot:
     def __init__(
         self,
@@ -1356,11 +1495,19 @@ class TelegramBot:
         self.cinema_label = cinema_label
         self._commands_text_cache: dict[str, str] = {}
         self._help_text_cache: dict[str, str] = {}
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="telegram-update")
+        self._seen_update_ids: deque[int] = deque()
+        self._seen_update_id_set: set[int] = set()
+        self._seen_update_lock = threading.Lock()
         self.api_base = f"https://api.telegram.org/bot{self.token}"
         self.offset = 0
 
     def run(self) -> None:
-        logging.info("Telegram-бот запущено.")
+        self.run_polling()
+
+    def run_polling(self) -> None:
+        logging.info("Telegram-бот запущено в polling-режимі.")
+        self._delete_webhook()
         self._register_commands()
         while True:
             try:
@@ -1375,6 +1522,42 @@ class TelegramBot:
                 logging.exception("Неочікувана помилка: %s", exc)
                 time.sleep(3)
 
+    def run_webhook(self, config: WebhookConfig) -> None:
+        logging.info("Telegram-бот запущено в webhook-режимі.")
+        self._register_commands()
+        handler = make_webhook_handler(self, config)
+        server = ThreadingHTTPServer((config.listen_host, config.listen_port), handler)
+
+        if config.direct_tls_enabled:
+            assert config.cert_file is not None
+            assert config.key_file is not None
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ssl_context.load_cert_chain(certfile=config.cert_file, keyfile=config.key_file)
+            server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+            logging.info(
+                "Webhook HTTP-сервер слухає HTTPS на %s:%s",
+                config.listen_host,
+                config.listen_port,
+            )
+        else:
+            logging.info(
+                "Webhook HTTP-сервер слухає HTTP на %s:%s",
+                config.listen_host,
+                config.listen_port,
+            )
+
+        self._set_webhook(config)
+        try:
+            server.serve_forever(poll_interval=0.5)
+        except KeyboardInterrupt:
+            logging.info("Зупинка webhook-сервера.")
+        finally:
+            server.server_close()
+            self.shutdown()
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=False)
+
     def _get_updates(self) -> list[dict[str, Any]]:
         response = requests.get(
             f"{self.api_base}/getUpdates",
@@ -1386,6 +1569,85 @@ class TelegramBot:
         if not payload.get("ok"):
             raise RuntimeError(f"Telegram API error: {payload}")
         return payload.get("result", [])
+
+    def _delete_webhook(self) -> None:
+        try:
+            response = requests.post(
+                f"{self.api_base}/deleteWebhook",
+                json={"drop_pending_updates": False},
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not payload.get("ok"):
+                logging.warning("Не вдалося вимкнути webhook перед polling: %s", payload)
+        except Exception as exc:
+            logging.warning("Не вдалося викликати deleteWebhook: %s", exc)
+
+    def _set_webhook(self, config: WebhookConfig) -> None:
+        payload: dict[str, Any] = {
+            "url": config.url,
+            "allowed_updates": WEBHOOK_ALLOWED_UPDATES,
+            "secret_token": config.secret_token,
+            "drop_pending_updates": config.drop_pending_updates,
+            "max_connections": config.max_connections,
+        }
+        if config.ip_address:
+            payload["ip_address"] = config.ip_address
+
+        if config.upload_certificate:
+            if not config.cert_file:
+                raise RuntimeError("TELEGRAM_WEBHOOK_UPLOAD_CERT=1 потребує TELEGRAM_WEBHOOK_CERT_FILE.")
+            form_payload = {
+                "url": config.url,
+                "allowed_updates": json.dumps(WEBHOOK_ALLOWED_UPDATES),
+                "secret_token": config.secret_token,
+                "drop_pending_updates": "true" if config.drop_pending_updates else "false",
+                "max_connections": str(config.max_connections),
+            }
+            if config.ip_address:
+                form_payload["ip_address"] = config.ip_address
+            with open(config.cert_file, "rb") as cert_handle:
+                response = requests.post(
+                    f"{self.api_base}/setWebhook",
+                    data=form_payload,
+                    files={"certificate": cert_handle},
+                    timeout=60,
+                )
+        else:
+            response = requests.post(
+                f"{self.api_base}/setWebhook",
+                json=payload,
+                timeout=30,
+            )
+
+        response.raise_for_status()
+        result = response.json()
+        if not result.get("ok"):
+            raise RuntimeError(f"Telegram setWebhook failed: {result}")
+        logging.info("Webhook зареєстровано: %s", config.url)
+
+    def handle_update_async(self, update: dict[str, Any]) -> None:
+        update_id = update.get("update_id")
+        if isinstance(update_id, int):
+            with self._seen_update_lock:
+                if update_id in self._seen_update_id_set:
+                    logging.info("Повторний Telegram update_id=%s пропущено.", update_id)
+                    return
+                if len(self._seen_update_ids) >= 500:
+                    old_update_id = self._seen_update_ids.popleft()
+                    self._seen_update_id_set.discard(old_update_id)
+                self._seen_update_ids.append(update_id)
+                self._seen_update_id_set.add(update_id)
+
+        future = self._executor.submit(self._handle_update, update)
+        future.add_done_callback(self._log_async_update_error)
+
+    def _log_async_update_error(self, future: Future[None]) -> None:
+        try:
+            future.result()
+        except Exception as exc:
+            logging.exception("Не вдалося обробити Telegram update: %s", exc)
 
     def _send_message(self, chat_id: int, text: str) -> None:
         for part in split_for_telegram(text):
@@ -1620,6 +1882,17 @@ def main() -> None:
         default=os.getenv("MULTIKINO_CINEMA_SLUG", DEFAULT_CINEMA_SLUG),
         help="slug кінотеатру з URL Multikino",
     )
+    parser.add_argument(
+        "--update-mode",
+        choices=("auto", "polling", "webhook"),
+        default=normalize_text(os.getenv("TELEGRAM_UPDATE_MODE", "auto")),
+        help="як отримувати Telegram updates: polling або webhook",
+    )
+    parser.add_argument(
+        "--webhook-url",
+        default=os.getenv("TELEGRAM_WEBHOOK_URL", ""),
+        help="публічний HTTPS URL для Telegram webhook",
+    )
     args = parser.parse_args()
 
     timezone_name = os.getenv("BOT_TIMEZONE", "Europe/Warsaw")
@@ -1671,7 +1944,15 @@ def main() -> None:
         locale_auto=locale_auto,
         cinema_label=cinema_label,
     )
-    bot.run()
+    update_mode = args.update_mode
+    if update_mode == "auto":
+        update_mode = "webhook" if args.webhook_url.strip() else "polling"
+
+    if update_mode == "webhook":
+        webhook_config = build_webhook_config(token, args.webhook_url)
+        bot.run_webhook(webhook_config)
+    else:
+        bot.run_polling()
 
 
 if __name__ == "__main__":

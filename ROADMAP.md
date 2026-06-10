@@ -18,6 +18,7 @@ Telegram bot for Multikino (Warszawa Mlociny) that:
 - Release-year enrichment and retro grouping by decades.
 - Ratings integration (TMDb + OMDb), including genre/year correction fallback.
 - Telegram command menu registration via `setMyCommands`.
+- Telegram updates can run via polling or webhook.
 - Dockerized deployment and server-side deploy script.
 - Local-to-remote deploy helper script.
 - Locale-aware command/help responses with auto-detection by Telegram language code.
@@ -63,6 +64,18 @@ Telegram bot for Multikino (Warszawa Mlociny) that:
 - `BOT_TIMEZONE`
 - `WEEK_DAYS`
 - `MODERN_YEAR_THRESHOLD`
+- `TELEGRAM_UPDATE_MODE`
+- `TELEGRAM_WEBHOOK_URL`
+- `TELEGRAM_WEBHOOK_SECRET`
+- `TELEGRAM_WEBHOOK_LISTEN_HOST`
+- `TELEGRAM_WEBHOOK_LISTEN_PORT`
+- `TELEGRAM_WEBHOOK_PORT`
+- `TELEGRAM_WEBHOOK_CERT_FILE`
+- `TELEGRAM_WEBHOOK_KEY_FILE`
+- `TELEGRAM_WEBHOOK_UPLOAD_CERT`
+- `TELEGRAM_WEBHOOK_DROP_PENDING_UPDATES`
+- `TELEGRAM_WEBHOOK_MAX_CONNECTIONS`
+- `TELEGRAM_WEBHOOK_IP_ADDRESS`
 - `TMDB_API_KEY`
 - `OMDB_API_KEY`
 
@@ -102,7 +115,7 @@ Telegram bot for Multikino (Warszawa Mlociny) that:
 
 ### Milestone D - Ops & Deployment
 
-1. Add healthcheck endpoint/command for container readiness.
+1. Keep webhook health endpoint stable (`/healthz`).
 2. Add rolling deploy notes and rollback checklist.
 3. Add post-deploy smoke test script (`/today_l`, `/help`, `/commands`).
 

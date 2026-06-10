@@ -46,6 +46,11 @@ python3 bot.py --print-week
 python3 bot.py
 ```
 
+За замовчуванням бот працює в `auto`-режимі:
+
+- якщо `TELEGRAM_WEBHOOK_URL` порожній, використовується старий polling через `getUpdates`;
+- якщо `TELEGRAM_WEBHOOK_URL` заданий, бот сам реєструє webhook через `setWebhook` і Telegram надсилає updates на твій сервер.
+
 Команди в Telegram:
 
 - `/week` — звіт на 7 днів (із сеансами);
@@ -57,7 +62,74 @@ python3 bot.py
 - `/commands` — список доступних команд;
 - `/help` — довідка.
 
-## 5) Деплой у Docker (Linux VPS)
+## 5) Webhook на VPS
+
+Telegram webhook потребує публічний `HTTPS` URL. Підтримувані Telegram порти для webhook: `443`, `80`, `88`, `8443`.
+
+### Варіант A: reverse proxy з доменом
+
+Це найзручніший варіант, якщо є домен і Caddy/Nginx робить HTTPS:
+
+```bash
+TELEGRAM_UPDATE_MODE=webhook
+TELEGRAM_WEBHOOK_URL=https://kino.example.com/telegram/webhook
+TELEGRAM_WEBHOOK_LISTEN_HOST=0.0.0.0
+TELEGRAM_WEBHOOK_LISTEN_PORT=8080
+TELEGRAM_WEBHOOK_PORT=8080
+```
+
+Reverse proxy має прокидати запити на контейнерний порт `8080`.
+
+### Варіант B: напряму на зовнішній IP і порт 8443
+
+Якщо домену немає, можна підняти прямий HTTPS у контейнері та передати Telegram self-signed сертифікат.
+
+На сервері створи сертифікат:
+
+```bash
+cd /opt/bot_kino-container/current
+mkdir -p runtime/secrets
+openssl req -newkey rsa:2048 -sha256 -nodes -x509 -days 365 \
+  -keyout runtime/secrets/webhook.key \
+  -out runtime/secrets/webhook.crt \
+  -subj "/CN=130.162.43.132" \
+  -addext "subjectAltName=IP:130.162.43.132"
+chmod 600 runtime/secrets/webhook.key runtime/secrets/webhook.crt
+```
+
+У `.env`:
+
+```bash
+TELEGRAM_UPDATE_MODE=webhook
+TELEGRAM_WEBHOOK_URL=https://130.162.43.132:8443
+TELEGRAM_WEBHOOK_LISTEN_PORT=8443
+TELEGRAM_WEBHOOK_PORT=8443
+TELEGRAM_WEBHOOK_CERT_FILE=/app/runtime/secrets/webhook.crt
+TELEGRAM_WEBHOOK_KEY_FILE=/app/runtime/secrets/webhook.key
+TELEGRAM_WEBHOOK_UPLOAD_CERT=1
+```
+
+Також відкрий порт `8443/tcp` у firewall на сервері та в ingress rules Oracle Cloud.
+
+```bash
+sudo firewall-cmd --permanent --add-port=8443/tcp
+sudo firewall-cmd --reload
+```
+
+Після зміни `.env`:
+
+```bash
+docker compose -f /opt/bot_kino-container/current/docker-compose.yml up -d --build --force-recreate
+docker compose -f /opt/bot_kino-container/current/docker-compose.yml logs -f --tail=120
+```
+
+Перевірка локального health endpoint:
+
+```bash
+curl -k https://130.162.43.132:8443/healthz
+```
+
+## 6) Деплой у Docker (Linux VPS)
 
 На сервері в папці проєкту:
 
